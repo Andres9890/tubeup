@@ -20,7 +20,7 @@ from .utils import (get_itemname, check_is_file_empty,
 from logging import getLogger
 from urllib.parse import urlparse
 
-from tubeup import __version__
+from tubeupthosecomments import __version__
 
 
 DOWNLOAD_DIR_NAME = 'downloads'
@@ -762,9 +762,9 @@ class TubeUpThoseComments(object):
             elif 'uploader_url' in vid_meta and vid_meta['uploader_url']:
                 uploader = vid_meta['uploader_url']
             else:
-                uploader = 'tubeup.py'
+                uploader = 'tubeupthosecomments.py'
         except TypeError:  # apparently uploader is null as well
-            uploader = 'tubeup.py'
+            uploader = 'tubeupthosecomments.py'
 
         try:  # some videos don't give an upload date
             d = datetime.strptime(vid_meta['upload_date'], '%Y%m%d')

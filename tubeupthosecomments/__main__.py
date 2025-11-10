@@ -18,7 +18,7 @@
 """tubeupthosecomments - Download a video with yt-dlp, extract comments, then upload to Internet Archive, passing all metadata
 
 Usage:
-  tubeup <url>... [--username <user>] [--password <pass>]
+  tubeupthosecomments <url>... [--username <user>] [--password <pass>]
                   [--metadata=<key:value>...]
                   [--cookies=<filename>]
                   [--proxy <prox>]
@@ -27,8 +27,8 @@ Usage:
                   [--output <output>]
                   [--ignore-existing-item]
                   [--comment-threads <threads>]
-  tubeup -h | --help
-  tubeup --version
+  tubeupthosecomments -h | --help
+  tubeupthosecomments --version
 
 Arguments:
   <url>                         yt-dlp compatible URL to download.
@@ -69,9 +69,9 @@ import docopt
 import logging
 import traceback
 
-from tubeup.utils import key_value_to_dict
-from tubeup.TubeUpThoseComments import TubeUpThoseComments
-from tubeup import __version__
+from tubeupthosecomments.utils import key_value_to_dict
+from tubeupthosecomments.TubeUpThoseComments import TubeUpThoseComments
+from tubeupthosecomments import __version__
 
 
 def main():
@@ -127,7 +127,7 @@ def main():
               'An exception just occured, if you found this '
               "exception isn't related with any of your connection problem, "
               'please report this issue to '
-              'https://github.com/bibanon/tubeup/issues')
+              'https://github.com/Andres9890/tubeupthosecomments/issues')
         traceback.print_exc()
         print('\033[0m')  # End the red color text
         sys.exit(1)

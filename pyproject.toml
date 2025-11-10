@@ -3,11 +3,11 @@ requires = ["setuptools>=61.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tubeup"
+name = "tubeupthosecomments"
 dynamic = ["version"]
-description = "VOD service to Archive.org uploader"
+description = "A fork of tubeup that has comment archiving included"
 authors = [
-    {name = "Bibliotheca Anonoma"}
+    {name = "Andres99"}
 ]
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,13 +15,15 @@ license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 dependencies = [
     "internetarchive",
-    "docopt==0.6.2",
+    "docopt-ng",
+    "tqdm",
     "yt-dlp[default,curl-cffi]",
 ]
 keywords = [
     "archive.org",
     "archiving",
     "bibliotheca anonoma",
+    "Andres99",
     "internet archive",
     "vod",
     "video",
@@ -29,6 +31,7 @@ keywords = [
     "youtube-dl",
     "youtube-dlc",
     "yt-dlp",
+    "comments",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -48,12 +51,12 @@ classifiers = [
 ]
 
 [project.urls]
-homepage = "https://github.com/bibanon/tubeup"
-source = "https://github.com/bibanon/tubeup.git"
-issues = "https://github.com/bibanon/tubeup/issues"
+homepage = "https://github.com/Andres9890/tubeupthosecomments"
+source = "https://github.com/Andres9890/tubeupthosecomments.git"
+issues = "https://github.com/Andres9890/tubeupthosecomments/issues"
 
 [project.scripts]
-tubeup = "tubeup.__main__:main"
+tubeupthosecomments = "tubeupthosecomments.__main__:main"
 
 [tool.setuptools.dynamic]
-version = {attr = "tubeup.__version__"}
+version = {attr = "tubeupthosecomments.__version__"}

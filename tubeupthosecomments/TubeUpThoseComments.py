@@ -6,12 +6,17 @@ import time
 import json
 import logging
 import internetarchive
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from internetarchive.config import parse_config_file
 from datetime import datetime
 from yt_dlp import YoutubeDL
 from .utils import (get_itemname, check_is_file_empty,
-                    EMPTY_ANNOTATION_FILE)
+                    EMPTY_ANNOTATION_FILE, extract_video_id,
+                    normalize_comment, atomic_write_text, CommentStats)
 from logging import getLogger
 from urllib.parse import urlparse
 
@@ -20,8 +25,42 @@ from tubeup import __version__
 
 DOWNLOAD_DIR_NAME = 'downloads'
 
+# Platform-specific comment extraction configurations
+PLATFORM_COMMENT_CONFIGS = {
+    'youtube': {
+        'extractor_args': 'youtube:comment_sort=top;max_comments=all,all,all;max_comment_depth=10',
+        'supports_threading': True,
+        'file_extension': '.comments.json'
+    },
+    'tiktok': {
+        'extractor_args': 'tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com',
+        'supports_threading': False,
+        'file_extension': '.comments.json'
+    },
+    'twitch': {
+        'extractor_args': None,
+        'supports_threading': False,
+        'file_extension': '.comments.json'
+    },
+    'soundcloud': {
+        'extractor_args': None,
+        'supports_threading': False,
+        'file_extension': '.comments.json'
+    },
+    'bilibili': {
+        'extractor_args': None,
+        'supports_threading': False,
+        'file_extension': '.comments.json'
+    },
+    'niconico': {
+        'extractor_args': None,
+        'supports_threading': False,
+        'file_extension': '.comments.json'
+    }
+}
 
-class TubeUp(object):
+
+class TubeUpThoseComments(object):
 
     def __init__(self,
                  verbose=False,
@@ -29,8 +68,8 @@ class TubeUp(object):
                  ia_config_path=None,
                  output_template=None):
         """
-        `tubeup` is a tool to archive YouTube by downloading the videos and
-        uploading it back to the archive.org.
+        `tubeupthosecomments` is a tool to archive videos by downloading the videos and comments,
+        then uploading it all back to archive.org
 
         :param verbose:         A boolean, True means all loggings will be
                                 printed out to stdout.
@@ -54,6 +93,9 @@ class TubeUp(object):
         # Just print errors in quiet mode
         if not self.verbose:
             self.logger.setLevel(logging.ERROR)
+        
+        # Initialize comment statistics tracker
+        self.comment_stats = CommentStats()
 
     @property
     def dir_path(self):
@@ -82,13 +124,229 @@ class TubeUp(object):
                                       DOWNLOAD_DIR_NAME)
         }
 
+    def detect_platform(self, url):
+        """
+        Detect the platform from a URL.
+        
+        :param url: The URL to check
+        :return: Platform name or 'unknown'
+        """
+        domain_mappings = {
+            'youtube.com': 'youtube',
+            'youtu.be': 'youtube',
+            'tiktok.com': 'tiktok',
+            'twitch.tv': 'twitch',
+            'soundcloud.com': 'soundcloud',
+            'bilibili.com': 'bilibili',
+            'nicovideo.jp': 'niconico',
+            'nico.ms': 'niconico'
+        }
+        
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname or ''
+            
+            for domain, platform in domain_mappings.items():
+                if domain in hostname:
+                    return platform
+        except:
+            pass
+        
+        return 'unknown'
+
+    def download_comments(self, url, video_id=None, platform=None, max_retries=3):
+        """
+        Download comments for a video using yt-dlp
+        
+        :param url: The video URL
+        :param video_id: Optional video ID (will be extracted if not provided)
+        :param platform: Optional platform name (will be detected if not provided)
+        :param max_retries: Maximum number of retry attempts
+        :return: Path to the downloaded comments file or None
+        """
+        if not platform:
+            platform = self.detect_platform(url)
+        
+        if platform == 'unknown':
+            self.logger.warning(f"Unknown platform for URL: {url}, attempting generic comment extraction")
+        
+        # Extract video ID if not provided
+        if not video_id:
+            if platform == 'youtube':
+                video_id = extract_video_id(url)
+            else:
+                # Try to get ID from yt-dlp
+                try:
+                    with YoutubeDL({'quiet': True}) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        video_id = info.get('id', '')
+                except:
+                    video_id = url.split('/')[-1].split('?')[0]
+        
+        if not video_id:
+            self.logger.error(f"Could not extract video ID from URL: {url}")
+            return None
+        
+        # Determine output file path (in root directory, not in downloads folder)
+        output_file = os.path.join(self._dir_path['root'], f"{video_id}.comments.json")
+        
+        # Check if comments already exist
+        if os.path.exists(output_file):
+            self.logger.info(f"Comments file already exists: {output_file}")
+            self.comment_stats.increment('skipped_exists')
+            return output_file
+        
+        # Get platform-specific configuration
+        platform_config = PLATFORM_COMMENT_CONFIGS.get(platform, {})
+        
+        # Build yt-dlp command
+        command = [
+            'yt-dlp',
+            '--skip-download',
+            '--write-comments',
+            '--no-write-info-json',
+            '-o', os.path.join(self._dir_path['root'], video_id),
+        ]
+        
+        # Add platform-specific extractor args
+        if platform_config.get('extractor_args'):
+            if platform_config.get('supports_threading'):
+                # For YouTube, add threading support
+                command.extend([
+                    '--extractor-args',
+                    f"{platform_config['extractor_args']},thread_count=10"
+                ])
+            else:
+                command.extend([
+                    '--extractor-args',
+                    platform_config['extractor_args']
+                ])
+        
+        command.append(url)
+        
+        # Try downloading with retries
+        for attempt in range(max_retries):
+            try:
+                if self.verbose:
+                    print(f"Attempt {attempt + 1}/{max_retries}: Extracting comments for {video_id} from {platform}...")
+                
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=1800  # 30 minute timeout
+                )
+                
+                if result.returncode == 0:
+                    if os.path.exists(output_file):
+                        # Normalize comments if platform is supported
+                        if platform in ['youtube', 'tiktok', 'twitch']:
+                            self._normalize_comments_file(output_file, platform)
+                        
+                        self.logger.info(f"Successfully extracted comments to: {output_file}")
+                        self.comment_stats.increment('successful')
+                        return output_file
+                    else:
+                        self.logger.info(f"No comments found for {video_id} (comments might be disabled)")
+                        self.comment_stats.increment('skipped_no_comments')
+                        return None
+                else:
+                    self.logger.warning(f"Attempt {attempt + 1} failed for {video_id}")
+                    
+                    # Check for specific errors
+                    error_output = result.stderr or result.stdout or ''
+                    if "Video unavailable" in error_output or "Private video" in error_output:
+                        self.logger.warning("Video is unavailable or private")
+                        self.comment_stats.increment('failed')
+                        return None
+                    elif "Comments are disabled" in error_output:
+                        self.logger.info("Comments are disabled for this video")
+                        self.comment_stats.increment('skipped_disabled')
+                        return None
+                    
+                    if attempt < max_retries - 1:
+                        wait_time = min(30 * (2 ** attempt), 300)  # Exponential backoff
+                        if self.verbose:
+                            print(f"Waiting {wait_time} seconds before retry...")
+                        time.sleep(wait_time)
+                        
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"Timeout extracting comments for {video_id}")
+                if attempt < max_retries - 1:
+                    time.sleep(30)
+            except Exception as e:
+                self.logger.error(f"Unexpected error extracting comments for {video_id}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(30)
+        
+        self.logger.error(f"Failed to extract comments for {video_id} after {max_retries} attempts")
+        self.comment_stats.increment('failed')
+        return None
+
+    def _normalize_comments_file(self, filepath, platform):
+        """
+        Normalize comments to a consistent schema across platforms
+        
+        :param filepath: Path to the comments JSON file
+        :param platform: Platform name
+        """
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if 'comments' in data:
+                normalized_comments = []
+                for comment in data['comments']:
+                    normalized = normalize_comment(comment, platform)
+                    if normalized:
+                        normalized_comments.append(normalized)
+                
+                data['normalized_comments'] = normalized_comments
+                data['comment_count'] = len(normalized_comments)
+                data['platform'] = platform
+                
+                # Write back the normalized data
+                atomic_write_text(Path(filepath), json.dumps(data, ensure_ascii=False, indent=2))
+                
+                self.logger.debug(f"Normalized {len(normalized_comments)} comments for {filepath}")
+        except Exception as e:
+            self.logger.warning(f"Failed to normalize comments in {filepath}: {e}")
+
+    def process_urls_with_comments(self, urls, num_threads=4):
+        """
+        Process multiple URLs in parallel for comment downloading.
+        
+        :param urls: List of URLs to process
+        :param num_threads: Number of parallel threads
+        :return: Dict mapping URLs to comment file paths
+        """
+        results = {}
+        
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            future_to_url = {
+                executor.submit(self.download_comments, url): url 
+                for url in urls
+            }
+            
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    comment_file = future.result()
+                    results[url] = comment_file
+                except Exception as e:
+                    self.logger.error(f"Error processing {url}: {e}")
+                    results[url] = None
+        
+        return results
+
     def get_resource_basenames(self, urls,
                                cookie_file=None, proxy_url=None,
                                ydl_username=None, ydl_password=None,
                                use_download_archive=False,
                                ignore_existing_item=False):
         """
-        Get resource basenames from an url.
+        Get resource basenames from urls, including automatic comment downloading.
 
         :param urls:                  A list of urls that will be downloaded with
                                       youtubedl.
@@ -124,8 +382,20 @@ class TubeUp(object):
             if ydl.in_download_archive(entry):
                 return
             if not check_if_ia_item_exists(entry):
+                # Download the video
                 ydl.extract_info(entry['webpage_url'])
                 downloaded_files_basename.update(self.create_basenames_from_ydl_info_dict(ydl, entry))
+                
+                video_url = entry.get('webpage_url', entry.get('url'))
+                video_id = entry.get('id')
+                platform = self.detect_platform(video_url)
+                
+                if self.verbose:
+                    print(f"\n:: Downloading comments for {video_id}...")
+                
+                comment_file = self.download_comments(video_url, video_id, platform)
+                if comment_file and self.verbose:
+                    print(f":: Comments saved to: {comment_file}")
             else:
                 ydl.record_download_archive(entry)
 
@@ -162,7 +432,6 @@ class TubeUp(object):
                     print(msg)
 
             if d['status'] == 'error':
-                # TODO: Complete the error message
                 msg = 'Error when downloading the video'
 
                 self.logger.error(msg)
@@ -188,6 +457,28 @@ class TubeUp(object):
                 else:
                     info_dict = ydl.extract_info(url)
                     downloaded_files_basename.update(self.create_basenames_from_ydl_info_dict(ydl, info_dict))
+                    
+                    # Download comments
+                    video_url = info_dict.get('webpage_url', url)
+                    video_id = info_dict.get('id')
+                    platform = self.detect_platform(video_url)
+                    
+                    if self.verbose:
+                        print(f"\n:: Downloading comments for {video_id} from {platform}...")
+                    
+                    comment_file = self.download_comments(video_url, video_id, platform)
+                    if comment_file and self.verbose:
+                        print(f":: Comments saved to: {comment_file}")
+
+        # Print comment download statistics
+        if self.verbose:
+            stats = self.comment_stats.get_summary()
+            print("\n:: Comment Download Summary::")
+            print(f"  Successful: {stats['successful']}")
+            print(f"  Failed: {stats['failed']}")
+            print(f"  Already exists: {stats['skipped_exists']}")
+            print(f"  No comments: {stats['skipped_no_comments']}")
+            print(f"  Comments disabled: {stats['skipped_disabled']}")
 
         self.logger.debug(
             'Basenames obtained from url (%s): %s'
@@ -299,7 +590,7 @@ class TubeUp(object):
 
     def upload_ia(self, videobasename, custom_meta=None):
         """
-        Upload video to archive.org.
+        Upload video and comments to archive.org.
 
         :param videobasename:  A video base name.
         :param custom_meta:    A custom meta, will be used by internetarchive
@@ -342,6 +633,13 @@ class TubeUp(object):
         # Upload all files with videobase name: e.g. video.mp4,
         # video.info.json, video.srt, etc.
         files_to_upload = glob.glob(videobasename + '*')
+        
+        # Also check for comments file in root directory
+        video_id = vid_meta.get('id')
+        if video_id:
+            comment_file_path = os.path.join(self.dir_path['root'], f"{video_id}.comments.json")
+            if os.path.exists(comment_file_path):
+                files_to_upload.append(comment_file_path)
 
         # Upload the item to the Internet Archive
         item = internetarchive.get_item(itemname)
@@ -376,7 +674,7 @@ class TubeUp(object):
                      use_download_archive=False,
                      ignore_existing_item=False):
         """
-        Download and upload videos from youtube_dl supported sites to
+        Download and upload videos with comments from yt-dlp supported sites to
         archive.org
 
         :param urls:                  List of url that will be downloaded and uploaded
@@ -452,7 +750,7 @@ class TubeUp(object):
         title = '%s' % (vid_meta['title'])
         videourl = vid_meta['webpage_url']
 
-        collection = TubeUp.determine_collection_type(videourl)
+        collection = TubeUpThoseComments.determine_collection_type(videourl)
 
         # Some video services don't tell you the uploader,
         # use our program's name in that case.
@@ -507,7 +805,7 @@ class TubeUp(object):
             tags_string = ';'.join(tags_list)
 
         # license
-        licenseurl = TubeUp.determine_licenseurl(vid_meta)
+        licenseurl = TubeUpThoseComments.determine_licenseurl(vid_meta)
 
         # if there is no description don't upload the empty .description file
         description_text = vid_meta.get('description', '')
@@ -531,7 +829,7 @@ class TubeUp(object):
 
             # Set 'scanner' metadata pair to allow tracking of TubeUp
             # powered uploads, per request from archive.org
-            scanner='TubeUp Video Stream Mirroring Application {}'.format(__version__))
+            scanner='TubeUpThoseComments Video Stream Comment Mirroring Application {}'.format(__version__))
 
         # add channel url if it exists
         if 'uploader_url' in vid_meta:
@@ -540,3 +838,7 @@ class TubeUp(object):
             metadata["channel"] = vid_meta["channel_url"]
 
         return metadata
+
+
+# Keep backward compatibility
+TubeUp = TubeUpThoseComments

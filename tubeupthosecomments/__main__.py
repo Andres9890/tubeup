@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# tubeup.py - Download a video using youtube-dl and upload to the Internet Archive with metadata
+# tubeupthosecomments.py - Download a video using yt-dlp and upload to the Internet Archive with metadata
 
 # Copyright (C) 2018 Bibliotheca Anonoma
 # This program is free software: you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-"""tubeup - Download a video with Youtube-dlc, then upload to Internet Archive, passing all metadata.
+"""tubeupthosecomments - Download a video with yt-dlp, extract comments, then upload to Internet Archive, passing all metadata
 
 Usage:
   tubeup <url>... [--username <user>] [--password <pass>]
@@ -26,13 +26,16 @@ Usage:
                   [--use-download-archive]
                   [--output <output>]
                   [--ignore-existing-item]
+                  [--comment-threads <threads>]
   tubeup -h | --help
   tubeup --version
 
 Arguments:
-  <url>                         Youtube-dlc compatible URL to download.
-                                Check Youtube-dlc documentation for a list
-                                of compatible websites.
+  <url>                         yt-dlp compatible URL to download.
+                                Check yt-dlp documentation for a list
+                                of compatible websites. Comments will be
+                                automatically downloaded for all supported
+                                platforms (YouTube, TikTok, Twitch, etc.)
   --metadata=<key:value>        Custom metadata to add to the archive.org
                                 item.
 
@@ -47,8 +50,18 @@ Options:
                                downloaded videos in it.
   -q --quiet                   Just print errors.
   -d --debug                   Print all logs to stdout.
-  -o --output <output>         Youtube-dlc output template.
+  -o --output <output>         yt-dlp output template.
   -i --ignore-existing-item    Don't check if an item already exists on archive.org
+  --comment-threads <threads>  Number of threads for parallel comment downloading (default: 4)
+
+Comments are downloaded for all videos
+      Supported platforms for comment extraction include:
+      - YouTube (with full thread support)
+      - TikTok
+      - Twitch (VOD comments)
+      - SoundCloud
+      - BiliBili
+      - Niconico
 """
 
 import sys
@@ -57,7 +70,7 @@ import logging
 import traceback
 
 from tubeup.utils import key_value_to_dict
-from tubeup.TubeUp import TubeUp
+from tubeup.TubeUpThoseComments import TubeUpThoseComments
 from tubeup import __version__
 
 
@@ -74,6 +87,7 @@ def main():
     debug_mode = args['--debug']
     use_download_archive = args['--use-download-archive']
     ignore_existing_item = args['--ignore-existing-item']
+    comment_threads = int(args.get('--comment-threads', 4))
 
     if debug_mode:
         # Display log messages.
@@ -90,10 +104,14 @@ def main():
 
     metadata = key_value_to_dict(args['--metadata'])
 
-    tu = TubeUp(verbose=not quiet_mode,
-                output_template=args['--output'])
+    # Use TubeUpThoseComments which includes comment downloading
+    tu = TubeUpThoseComments(verbose=not quiet_mode,
+                            output_template=args['--output'])
 
     try:
+        print('\n:: TubeUpThoseComments with Comment Extraction ::')
+        print(':: Comments will be downloaded for all supported platforms ::')
+        
         for identifier, meta in tu.archive_urls(URLs, metadata,
                                                 cookie_file, proxy_url,
                                                 username, password,
@@ -101,7 +119,9 @@ def main():
                                                 ignore_existing_item):
             print('\n:: Upload Finished. Item information:')
             print('Title: %s' % meta['title'])
-            print('Item URL: https://archive.org/details/%s\n' % identifier)
+            print('Item URL: https://archive.org/details/%s' % identifier)
+            print()
+            
     except Exception:
         print('\n\033[91m'  # Start red color text
               'An exception just occured, if you found this '
